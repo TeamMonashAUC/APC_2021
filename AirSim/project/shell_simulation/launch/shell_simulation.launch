@@ -1,0 +1,6 @@
+<launch>
+  <node name="timer" pkg="airsim_2dnav" type="timer.py" output="screen"/>
+  <node name="score" pkg="airsim_2dnav" type="score.py" output="screen"/>
+  <node name="car_control" pkg="airsim_2dnav" type="car_control" output="screen"/>
+  <node name="goals" pkg="airsim_2dnav" type="goals.py" output="screen"/>
+</launch>

@@ -1,0 +1,16 @@
+<launch>
+   <node pkg="move_base" type="move_base" respawn="false" name="move_base">
+    <param name="controller_frequency" value="5.0"/>
+    <param name="planner_frequency" value="2.0"/>
+    <param name="base_global_planner" value="global_planner/GlobalPlanner" />
+    <param name="base_local_planner" value="teb_local_planner/TebLocalPlannerROS" />
+    <rosparam file="$(find airsim_2dnav)/config/costmap_common_params.yaml" command="load" ns="global_costmap" />
+    <rosparam file="$(find airsim_2dnav)/config/costmap_common_params.yaml" command="load" ns="local_costmap" />
+    <rosparam file="$(find airsim_2dnav)/config/local_costmap_params.yaml" command="load" />
+    <rosparam file="$(find airsim_2dnav)/config/global_costmap_params.yaml" command="load" />
+    <rosparam file="$(find airsim_2dnav)/config/base_local_planner_params.yaml" command="load" />
+    <rosparam file="$(find airsim_2dnav)/config/base_global_planner_params.yaml" command="load" />
+    <rosparam file="$(find airsim_2dnav)/config/move_base_params.yaml" command="load" />
+ </node>
+
+</launch>

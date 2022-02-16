@@ -1,0 +1,29 @@
+# Name: Drayang Chua Kai Yang
+# Date: 8 Feb 2021
+# School: Monash University Malaysia
+
+# Description: The yaml file decides the global planner parameters for global path planning navigation. 
+#             The parameters defined in this yaml file include “use_dijkstra”, “use_grid_path”, “allow_unknown”, 
+#             “lethal_cost”, “cost_factor” and “neutral_cost”. All parameters are set at default value except 
+#             allow_unknown parameter. The value for each parameter is summarised below:
+
+# More explanation about Dijkstra: It uses the roadmap approach to convert the problem into a graphic search method using the 
+#                                  information of a grid cell map. This method starts with a set of candidate nodes where the 
+#                                  vehicle is able to navigate (free space) assigning a cost value to each of them.
+
+
+GlobalPlanner:
+  # “Use_dijkstra” is set as true to allow the planner to apply dijkstra’s algorithm. 
+  # “Use_grid_path” is set as false so the planner creates a path using gradient descent method.
+  # “allow_unknown” is set as false so the planner does not create any plans that traverse unknown space. 
+  use_dijkstra: true
+  use_grid_path: false
+  allow_unknown: false
+
+  # Lethal cost cannot be changed so much or else might ignore obstacles, but cost factor and neutral cost can be optimized
+  # “Cost_factor”, “neutral_cost” and “lethal_cost” parameters impact the quality of the planned global path since they have 
+  # an effect on the heuristic of the algorithm. The algorithm is shown as below:
+  # Cost = COST_NEUTRAL + COST_FACTOR* COSTMAP_COST_VALUE
+  lethal_cost: 253
+  cost_factor: 0.55
+  neutral_cost: 66

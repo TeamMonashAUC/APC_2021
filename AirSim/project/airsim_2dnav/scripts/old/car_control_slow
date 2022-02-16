@@ -1,0 +1,392 @@
+#!/usr/bin/env python
+# Submission 9
+import rospy
+import roslib
+import tf
+from std_msgs.msg import String, Int8, Float64, Int32, Float32
+from geometry_msgs.msg import Vector3
+from nav_msgs.msg import Odometry
+import sensor_msgs
+import sensor_msgs.msg
+import math
+
+class Control:
+	def __init__(self):
+		self.steering = 0
+		self.brake = 0
+		self.throttle = 0
+		self.gear = "forward"
+		self.brake_data = Float64()
+		self.gear_data = String()
+		self.throttle_data = Float64()
+		self.steering_data = Float64()
+		self.pub_brake = rospy.Publisher("/brake_command", Float64, queue_size=10)
+		self.pub_gear = rospy.Publisher("/gear_command", String, queue_size=10)
+		self.pub_throttle = rospy.Publisher("/throttle_command", Float64, queue_size=10)
+		self.pub_steering = rospy.Publisher("/steering_command", Float64, queue_size=10)
+
+	def callback(self, msg):
+		# Define and initialize variables
+		global case, stop, xx, yy, passed, yaw, end
+		self.steering = 0
+		self.brake = 0
+		self.throttle = 0
+		self.gear="forward"
+		z_state = ""
+		target_speed = 0
+		a = 0
+		locOn = 0
+
+		if goal_type == 7 and stop == 1 and end == 0: # Exit control when reached goal
+			rospy.loginfo("Final goal reached! Params: [cornering: %d, vmax: %d, a_vmin: %d, a_fvmax: %f, vslow: %d, vc_atk: %d, vc_ext1: %d @ < %d, vc_ext2: %d, v3pD: %d, v3pR: %d, comments: %s]" %(useLoc,vmax,a_vmin,a_fvmax,vslow,vc_atk,vc_ext1[0],vc_ext1[1],vc_ext2,v3pD,v3pR,comments))
+			rospy.loginfo("Code Results: [Goals: %d, Distance(m): %f, Time(s): %f, Energy(J): %d, cpu_tot(avg): %f, cpu_tot(max): %f, cpu_cc(avg): %f,  cpu_cc(max): %f, cpu_mb(avg): %f, cpu_mb(max): %f, cpu_as(avg): %f,  cpu_as(max): %f, collisions: %d]" %(passed,distance,duration,math.ceil(energy),cpu_avg,cpu_max,cc_avg,cc_max,mb_avg,mb_max,asim_avg,asim_max,col))
+			end = 1
+			return
+		elif end == 1 or start == 0:
+			return
+
+		car_speed = math.sqrt(math.pow(v_x, 2) + math.pow(v_y, 2))
+
+		# Calculate distance from car to goal
+		diff_radius = math.sqrt(math.pow(goal_x - car_x,2) + math.pow(goal_y - car_y,2))
+
+		if case == -1 and goal_type not in [6,8]: # Switch back to auto after done reversing
+			self.gear = "forward"
+			self.brake = 1
+			stop = 0
+		### self.steering control for TEB // Max car steer: 1.0 rad (60 deg) ###
+		if car_speed > 1:
+			# Transform goal coordinates using forward kinematics
+			if abs(yaw) > 1.0:
+				yaw = 1
+			z = 2 * math.asin(yaw) + math.radians(90)  # theta
+			g_dx = -(math.cos(z) * (goal_x - car_x) - math.sin(z) * (goal_y - car_y))
+			g_dy = -(math.sin(z) * (goal_x - car_x) + math.cos(z) * (goal_y - car_y))
+			a = math.atan(g_dy / g_dx)  # alpha
+			if g_dx < 0 and goal_type not in [6,8]:
+				a = -a
+			# Steering adjustments
+			if goal_type not in [2,5,6,8]:  # Straights
+				if goal_type == 3:
+					gain = 0.8 * math.pow(car_speed / 10, 2) + 0.6
+				elif car_speed > 10:
+					gain = 1.3
+				else:
+					gain = 1
+
+				c = 1.7  # Differential gain
+				fct_z = c * math.exp(-abs(a)) + 0.7  # Differential constant for alpha
+				fct_z = 1.5
+				omega = fct_z * a
+				z_state = "Centering"
+
+			else:  # Corners and 3-p
+				gain = 1
+				z_state = "Cornering"
+				fct_z = 1.5  # Scalar constant
+				omega = fct_z * a
+
+
+			if omega != 0:
+				# Apply Ackermann's steering
+				r = car_speed / -omega
+				adjusted_z = math.atan(b_wheel_base / r)
+				self.steering = adjusted_z * gain
+
+
+		# self.throttle and self.brake control
+		if car_speed == 0 and stop == 0:  # Start moving
+			case = 0
+			self.throttle = 0.3
+
+		elif diff_radius > 1 and stop == 0:  # Outside of goal radius
+			if goal_type in [0,1,4] or (goal_type == 7 and diff_radius > slowRad):  # Fast straight path
+				if (diff_radius > 25 and car_speed < 11) or goal_type in [0,4]:  # Far from goal/turn
+					case = 1
+					target_speed = a_fvmax * car_speed + a_vmin
+				else:
+					case = 2
+					target_speed = vslow
+
+				if target_speed > vmax:  # Limit max acceleration
+					target_speed = vmax
+
+				fct = [1.3, 0.5]  # Acceleration gain
+
+				if (car_speed < target_speed):  # Accelerate
+					self.throttle = fct[0] * (target_speed - car_speed) / 10
+				# else:
+				# 	self.throttle = fct[1] * (car_speed - target_speed) / 10
+
+				elif goal_type not in [0,4] and (
+						(car_speed > 12 and diff_radius < 25) or (car_speed > 15 and diff_radius < 35) or (
+						car_speed > 21 and diff_radius < 45)):  # brake if too fast
+					self.brake = 0.3 * (car_speed - target_speed)
+
+			elif goal_type in [2,3]:  # Entering or exiting corner
+				if goal_type == 2:
+					target_speed = vc_atk
+				elif car_speed < vc_ext1[1]:
+					target_speed = vc_ext1[0]
+				else:
+					target_speed = vc_ext2
+				accel = (target_speed - car_speed) / 10
+				if accel >= 0:
+					case = 3
+					delay = 0
+					self.throttle = 0.1 * accel + 0.5
+
+			elif goal_type == 7:  # brake earlier if too fast
+				case = 4
+				if car_speed > 10:
+					self.brake = 0.5
+				elif diff_radius > 3:
+					target_speed = 4
+					self.throttle = 0.1 * (target_speed - car_speed) + 0.3
+
+			elif goal_type == 5:  # 3-point D
+				case = 5
+				target_speed = v3pD
+				self.throttle = 0.1 * (target_speed - car_speed) + 0.3
+
+			elif goal_type == 6:  # 3-point reverse, switch to manual
+				case = -1
+				self.steering = -self.steering  ### Comment this out if allow_init_with_backwards_motion is set to False
+				self.gear = "reverse"
+				if (diff_radius > 25 and car_speed < 11):  # Far from goal/turn
+					case = 1
+					target_speed = a_fvmax * car_speed + a_vmin
+				else:
+					case = 2
+					target_speed = vslow
+
+				if target_speed > vmax:  # Limit max acceleration
+					target_speed = vmax
+
+				fct = [1.3, 0.5]  # Acceleration gain
+
+				if (car_speed < target_speed):  # Accelerate
+					self.throttle = fct[0] * (target_speed - car_speed) / 10
+				else:
+					self.throttle = fct[1] * (car_speed - target_speed) / 10
+
+			elif goal_type == 8:
+				case = -1
+				target_speed = vc_atk
+				self.steering = -self.steering  ### Comment this out if allow_init_with_backwards_motion is set to False
+				self.gear = "reverse"
+				accel = (target_speed - car_speed) / 10
+				if accel >= 0:
+					delay = 0
+					self.throttle = 0.2 * accel + 0.6
+
+
+		else:  # Full brake when radius less than 2 m
+			case = 5
+			stop = 1
+			self.brake = 1
+
+		# Ignore negative values and truncate values > 1
+		if self.throttle < 0:
+			self.throttle = 0
+
+		if self.brake < 0:
+			self.brake = 0
+
+		if self.throttle > 1:
+			self.throttle = 1
+
+		if self.brake > 1:
+			self.brake = 1
+
+		if abs(self.steering) > 1:
+			self.steering = abs(self.steering) / self.steering
+
+		# Publish controls
+		self.brake_data.data = self.brake
+		self.gear_data.data = self.gear
+		self.throttle_data.data = self.throttle
+		self.steering_data.data = -self.steering
+		self.pub_brake.publish(self.brake_data)
+		self.pub_gear.publish(self.gear_data)
+		self.pub_throttle.publish(self.throttle_data)
+		self.pub_steering.publish(self.steering_data)
+		# rospy.loginfo("cpu_cc(cur): %f, cpu_cc(avg): %f" %(cc_cur, cc_avg))
+		# rospy.loginfo("Status: [x (m): %f, y (m): %f, yaw (q): %f, dist_T (m): %f, time_E (s): %f, Energy (J): %d, Collisions: %d]" % (car_x, car_y, yaw, distance, duration, math.ceil(energy),col))
+		#rospy.loginfo("Publishing: [D_state: %d, Z_state: %s, Throttle:  %f, Brake: %f, target_speed: %d, Speed_cur: %f, angular_z: %f, a: %f, steer: %f, goal_type: %d, g_dx: %f, g_dy: %f, diff_radius: %f, passed: %d, f_loops: %d]" %(case, z_state, self.throttle, self.brake,target_speed,car_speed,omega,a,self.steering,goal_type,g_dx,g_dy,diff_radius,passed, fail))
+
+
+	def position(self, xyz):
+		global car_x, car_y, car_z, yaw, v_x, v_y, v_z
+		# global distance, energy, prev_x, prev_y, prev_z, prev_v, t0, t, car_speed, duration
+
+		# Get car position, velocity and orientation
+		car_x = xyz.pose.pose.position.x
+		car_y = xyz.pose.pose.position.y
+		car_z = xyz.pose.pose.position.z
+		yaw = xyz.pose.pose.orientation.z
+		v_x = xyz.twist.twist.linear.x
+		v_y = xyz.twist.twist.linear.y
+		v_z = xyz.twist.twist.linear.z
+
+
+	def goalcall(self, dest):
+		global goal_x, goal_y, goal_type, stop, start
+
+		stop = 0 # Global flag that causes the car to move when a new goal is set
+		start = 1
+		goal_x = dest.x
+		goal_y = dest.y
+		goal_type = int(dest.z)
+
+	def collision_count(self, cnt):
+		global col
+		col = cnt.data # For testing, the count will always increase if the car collided at least once in an AirSim session. To reset have to stop and play again
+
+	def getDistance(self,dist):
+		global distance
+		distance = dist.data
+
+	def getTime(self,te):
+		global duration
+		duration = te.data
+
+	def getEnergy(self,en):
+		global energy
+		energy = en.data
+
+	def getScore(self,num):
+		global passed
+		passed = num.data
+
+	def cpu_monitor_cc(self, usage):
+		global cc, cc_cnt, cc_avg, cc_max, cc_cur
+		cc_cur = usage.data
+
+		if usage.data > cc_max:
+			cc_max = usage.data
+
+		cc_cnt = cc_cnt + 1
+		cc = cc + usage.data
+		cc_avg = cc/cc_cnt
+
+	def cpu_monitor_mb(self, usage):
+		global mb, mb_cnt, mb_avg, mb_max
+
+		if usage.data > mb_max:
+			mb_max = usage.data
+
+		mb_cnt = mb_cnt + 1
+		mb = mb + usage.data
+		mb_avg = mb/mb_cnt
+
+	def cpu_monitor_tot(self, usage):
+		global cpu, cpu_cnt, cpu_avg, cpu_max
+
+		if usage.data > cpu_max:
+			cpu_max = usage.data
+
+		cpu_cnt = cpu_cnt + 1
+		cpu = cpu + usage.data
+		cpu_avg = cpu/cpu_cnt
+
+	def cpu_monitor_asim(self, usage):
+		global asim, asim_cnt, asim_avg, asim_max
+
+		if usage.data > asim_max:
+			asim_max = usage.data
+
+		asim_cnt = asim_cnt + 1
+		asim = asim + usage.data
+		asim_avg = asim/asim_cnt
+
+
+def listener():
+	global msg, car_x, car_y, car_z, yaw, v_x, v_y, v_z, goal_x, goal_y, stop, goal_type, col, start
+	global distance, energy, duration, car_speed, passed
+	global cpu_avg, cc_avg, mb_avg, cpu_max, cc_max, mb_max, cc_cur, asim_avg, asim_max
+	control = Control()
+	rospy.init_node('cmd_car_control')
+	# msg = Twist
+	rospy.Subscriber("/odom", Odometry, control.position) # Get car position
+	rospy.Subscriber("/goals", Vector3, control.goalcall)
+	rospy.Subscriber("/cpu_monitor/timer/cpu", Float32, control.cpu_monitor_mb)
+	rospy.Subscriber("/cpu_monitor/car_control/cpu", Float32, control.cpu_monitor_cc)
+	rospy.Subscriber("/cpu_monitor/total_cpu", Float32, control.cpu_monitor_tot)
+	rospy.Subscriber("/cpu_monitor/score/cpu", Float32, control.cpu_monitor_asim)
+	rospy.Subscriber("/airsim_node/PhysXCar/collision_count", Int32, control.collision_count)
+	rospy.Subscriber("/distance", Float64, control.getDistance)
+	rospy.Subscriber("/time", Float64, control.getTime)
+	rospy.Subscriber("/energy", Float64, control.getEnergy)
+	rospy.Subscriber("/score", Int8, control.getScore)
+	rospy.Subscriber("/control_timer", Float32, control.callback)
+	rospy.spin()
+
+if __name__ == '__main__':
+	case = 0
+	prev_steer = 0
+	car_speed = 0
+	goal_x = -5
+	goal_y = 0
+	g_dx = 0
+	g_dy = 0
+	car_x = 0
+	car_y = 0
+	car_z = 0
+	yaw = 0
+	stop = 0
+	goal_type = -1
+	xx = -100
+	yy = -100
+	passed = 0
+	fail = 0
+	tick = 0
+	r = 0
+	distance = 0
+	prev_x = 0
+	prev_y = 0
+	prev_z = 0
+	t0 = 0
+	duration = 0
+	energy = 0
+	col = 0
+	prev_v = 0
+	start = 0
+	end = 0
+	cpu_cnt = 0
+	cpu = 0
+	cpu_avg = 0
+	cc = 0
+	cc_cnt = 0
+	cc_avg = 0
+	mb = 0
+	mb_cnt = 0
+	mb_avg = 0
+	cpu_max = 0
+	cc_max = 0
+	mb_max = 0
+	asim_cur = 0
+	asim = 0
+	asim_cnt = 0
+	asim_avg = 0
+	asim_max = 0
+
+	# Constants
+	b_wheel_base = 3 # Wheelbase length [m]
+
+	# Parameters for cornering algorithm and target velocities
+	useLoc = 0 # 0 to use goal offset correction, 1 to use local plan correction for cornering
+	vmax = 12 # Top Speed at Straights
+	a_vmin = 5 # Min speed to accelerate to on straights
+	a_fvmax = 0.5 # Acceleration factor on straights
+	vslow = 10 # Top speed when slowing down at straights before corners
+	vc_atk = 6 # Cornering attack velocity
+	vc_ext1 = [8,0] # Cornering exit velocity, vc_ext1[0] @ car_speed < vc_ext1[1] *Set vc_ext1[1] to 0 to ignore vc_ext1 completely
+	vc_ext2 = 6 # Cornering exit velocity @ car_speed > vc_ext1[1], or if vc_ext1[1] == 0 then this is the exit velocity at all speeds
+	v3pD = 3 # 3p-D velocity
+	v3pR = 3 # 3p-R velocity
+	slowRad = 18 # Goal type 7 slow radius
+	config = 3
+	comments = "no move_base, config " + str(config)
+
+	listener()

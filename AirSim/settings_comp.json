@@ -1,0 +1,19 @@
+{
+    "ClockSpeed": 1.0,
+    "SettingsVersion": 1.2,
+    "SimMode": "Car",
+    "Vehicles": {
+        "PhysXCar": {
+            "EnableCollisionPassthrogh": true,
+            "EnableCollisions": false,
+            "Sensors": {
+                "Imu": {
+                    "Enabled": true,
+                    "SensorType": 2
+                }
+            },
+            "VehicleType": "PhysXCar"
+        }
+    },
+    "ViewMode": "SpringArmChase"
+}

@@ -1,0 +1,307 @@
+#!/usr/bin/env python
+import rospy
+import roslib
+import tf
+from std_msgs.msg import String, Int8
+from move_base_msgs.msg import MoveBaseActionGoal
+from geometry_msgs.msg import Twist, PoseStamped, PoseArray, Vector3
+from nav_msgs.msg import Odometry, Path
+import sensor_msgs
+import sensor_msgs.msg
+import airsim_car_ros_pkgs as air
+import airsim_car_ros_pkgs.msg
+import math
+
+
+def callback(msg):
+	pub = rospy.Publisher('/airsim_node/PhysXCar/car_cmd_body_frame', air.msg.CarCmd, queue_size=0)
+	controls=airsim_car_ros_pkgs.msg.CarCmd()
+
+
+	b_wheel_base= 3
+	target_speed = 0
+
+	global case, stop, prev_steer, r_flag, xx, yy, passed
+
+	# Settings:
+	# Other .yaml files updated on github
+	# controller_frequency: 5.0
+	# All other frequencies: 2.0
+
+ 	### Note ###
+	# a) - This script IGNORES linear twist input from /cmd_vel and instead uses hardcoded target velocities for higher efficiency, stability and
+	#      continuity (at least until the planner can be tuned better).
+	#    - This works as the assumption for the neighborhood environment is there are no dynamic/random obstacles in the middle of the road.
+	#    - The centering adjustments also will only work for pure x or y axis straight roads
+	#    - Only the angular twist input is considered, and the linear twist input is only taken for recovery behaviours in case of car stuck.
+	# b) - This script assumes that you are using goals_teb.py, or at least includes the portion of the code that publishes goal_type which this script uses.
+	#    - The function getType() below describes the different goal types used to represent different states.
+	#    - To simplify, the idea is to break down the path to the goal to a few points: i) before ii) during iii) after a corner. The car will travel at
+	#      high speeds while it is far from point i).
+	#    - Currently the car will also run at moderate speeds near goals.
+	#    - With the current TEB parameters, there is expected to be inconsistencies and the car may crash.
+
+
+	# Collision recovery - alternatively just send a goal where the car is on Rviz to trigger brake radius
+	if msg.linear.x >= 0:
+		r_flag = 0
+	else:
+		r_flag = r_flag + 1
+		if r_flag >= 10 and car_speed < 0.1 and goal_type != 5 and goal_type !=6:
+			stop = 1
+
+	if case == -1 and goal_type != 6: # Switch back to auto after done reversing
+		controls.is_manual_gear = False
+		controls.gear_immediate = False
+		controls.brake = 1
+		stop = 0
+
+
+
+	# Distance between car and goal
+	x_diff = goal_x - car_x
+	y_diff = goal_y - car_y
+
+	diff_radius = math.sqrt(math.pow(x_diff,2) + math.pow(y_diff,2))
+
+	# Save the TRUE goal
+	if goal_type == 4 and diff_radius < 10:
+		xx = goal_x
+		yy = goal_y
+
+	goal_diff = math.sqrt(math.pow(xx - car_x,2) + math.pow(yy - car_y,2))
+
+	# Check if car passed within 3m of the TRUE goal
+	if goal_diff < 3:
+		passed = passed + 1
+		xx = 0
+		yy = 0
+
+
+	### Steering control for TEB // Max car steer: 1.0 rad (60 deg) ###
+	if car_speed > 0.1:
+
+		if msg.angular.z != 0:
+
+			# Apply Ackermann's steering
+			r = car_speed/-msg.angular.z
+			adjusted_z = math.atan(b_wheel_base/r)
+
+			# Reducing steer gain on *fast* straight line path to dampen oscillations
+			if (goal_type == 0 or goal_type == 1 or goal_type == 4):
+				if (abs(x_diff) < 1 or abs(y_diff)< 1) and ((abs(yaw) < 0.7224 and abs(yaw) > 0.6915) or (abs(yaw) < 0.0218 or abs(yaw) > 0.99976)): # Centered on path (precision of 1m & 2.5 degs)
+					if car_speed < 10:
+						gain = 0.2
+					elif car_speed < 15:
+						gain = 0.3
+					else:
+						gain = 0.4
+				else:
+					gain = 1
+			else:
+				gain = 1
+
+			controls.steering = adjusted_z*gain
+		else:
+			if (abs(loc_y3) > 3 and loc_y3*prev_steer < 0): # Correct random 0's
+				controls.steering = prev_steer
+
+	# Save current steering for next loop
+	prev_steer = controls.steering
+
+
+	# Throttle and brake control
+	if car_speed == 0 and stop == 0: # Start moving
+		case =0
+		controls.throttle = 0.1
+
+
+	elif diff_radius > 2 and stop == 0: # Outside of goal radius
+		if goal_type == 0 or goal_type == 1 or goal_type == 4 or (goal_type == 7 and diff_radius > 20): # Fast straight path
+
+			if (diff_radius > 25 and car_speed < 11) or (diff_radius > 35 and car_speed < 15) or (diff_radius > 45 and car_speed >=15) or goal_type == 0: # Far from goal/turn
+				case = 1
+				target_speed = 1.1*car_speed + 6
+			else:
+				case = 2
+				target_speed = 10
+
+			if target_speed > 20: # Limit max acceleration
+				target_speed = 20
+
+			if goal_type == 4 and diff_radius < 20: # Reduce acceleration for goals
+				fct = 0.9
+			else:
+				fct = 1.3
+
+			if (car_speed < target_speed): # Accelerate
+				controls.throttle = fct*(target_speed - car_speed)/10
+			elif (car_speed > 12 and diff_radius < 25) or (car_speed > 15 and diff_radius < 35): # brake if too fast
+				controls.brake = 0.3*(car_speed - target_speed)
+
+		elif goal_type == 2 or goal_type == 3: # Entering or exiting corner
+			if goal_type == 2:
+				target_speed = 5.5
+			elif car_speed < 3:
+				target_speed = 5
+			else:
+				target_speed = 8
+			accel = (target_speed - car_speed)/10
+			if accel >=0:
+				case = 3
+				delay = 0
+				controls.throttle = 0.2*accel + 0.6
+
+		elif goal_type == 7: # brake earlier if too fast
+			case = 4
+			if car_speed > 10 and diff_radius < 20:
+				controls.brake = 0.5
+
+		elif goal_type == 5: # 3-point D
+			case = 5
+			target_speed = 3
+			controls.throttle = 0.1*(target_speed - car_speed) + 0.3
+
+		elif goal_type == 6: # 3-point reverse, switch to manual
+			case = -1
+			target_speed = 3
+			controls.steering = -controls.steering
+			controls.is_manual_gear = True
+			controls.manual_gear = -1
+			controls.gear_immediate = True
+			controls.throttle = 0.15*(target_speed - car_speed) + 0.15
+
+
+
+	else:  # Full brake when radius less than 2 m
+		case = 5
+		stop = 1
+		controls.brake = 1
+
+	if controls.throttle > 0.1 and case != 0 and car_speed < 0.1 and r_flag > 0 and goal_type != 5 and goal_type != 6: # Car stuck, ignore for 3-p
+		stop = 1
+
+	# Ignore negative values and truncate values > 1
+	if controls.throttle < 0 or controls.brake > 0 :
+		controls.throttle = 0
+
+	if controls.throttle > 1:
+		controls.throttle = 1
+
+	if controls.brake > 1:
+		controls.brake = 1
+
+	if abs(controls.steering) > 1:
+		controls.steering = abs(controls.steering)/controls.steering
+
+
+	pub.publish(controls)
+	rospy.loginfo("Publishing: [State: %d,Throttle:  %f,Brake: %f,linear_x: %f,target_speed: %d, Speed_cur: %f, angular_z: %f, Steering: %f,goal_type: %d,loc_y3: %f, glo_y3: %f, x_diff: %f, y_diff: %f,r_flag: %d, passed: %d]" %(case, controls.throttle, controls.brake,msg.linear.x,target_speed,car_speed,-msg.angular.z,controls.steering,goal_type,loc_y3,glo_y[3],x_diff, y_diff,r_flag,passed))
+
+def position(xyz):
+	global car_x, car_y, yaw, car_speed
+
+	# Frame at origin
+	car_x = xyz.pose.pose.position.x
+	car_y = xyz.pose.pose.position.y
+
+	yaw = xyz.pose.pose.orientation.z
+	car_speed = math.sqrt(math.pow(xyz.twist.twist.linear.x,2) + math.pow(xyz.twist.twist.linear.y,2))
+
+
+def goalcall(dest):
+	global goal_x, goal_y, stop
+
+	stop = 0 # Global flag that causes the car to move when a new goal is set
+	goal_x = dest.goal.target_pose.pose.position.x
+	goal_y = dest.goal.target_pose.pose.position.y
+
+def getType(type):
+	global goal_type
+
+	# Goal Type:
+	# 0 - Intermediate (arbitrary point in a straight road)
+	# 1 - Road End (before corner)
+	# 2 - Corner
+	# 3 - Exit Corner
+	# 4 - Goal
+	# 5 - 3-point D
+	# 6 - 3-point R
+	# 7 - Stop at goal
+	goal_type = type.data
+
+
+# TEB local path
+def localPlan(path):
+	global loc_y0, loc_y1, loc_y2, loc_y3
+
+	sizePose = len(path.poses)
+
+	loc_y0 = path.poses[0].position.y
+	loc_y1 = path.poses[1].position.y
+	loc_y2 = path.poses[sizePose - 2].position.y
+	loc_y3 = path.poses[sizePose - 1].position.y
+
+# Global Planner path
+def globPlan(path):
+	global glo_y, glo_x
+
+	sizePose = len(path.poses)
+	third3 = int(math.floor(sizePose/3))
+	third2 = int(math.floor(2*third3/3))
+	third = int(math.floor(third3/3))
+
+	coords = [[path.poses[0].pose.position.y,path.poses[0].pose.position.x],[path.poses[third].pose.position.y,path.poses[third].pose.position.x],[path.poses[third2].pose.position.y,path.poses[third2].pose.position.x],[path.poses[third3].pose.position.y,path.poses[third3].pose.position.x]]
+	z = 2*math.asin(yaw) + math.radians(90) # theta
+	rot = [[math.cos(z),-math.sin(z)],[math.sin(z),math.cos(z)]] # rotation matrix
+	glo_y = []
+	glo_x = []
+	poses = []
+
+	for i in range(len(coords)):
+		# Forward Kinematics. Can remove poses array and just do the calculation in glo_y, glo_x
+		x = coords[i][1] - car_x
+		y = coords[i][0] - car_y
+
+		poses.append([])
+		poses[i].append(-rot[0][0]*x - rot[0][1]*y) # x
+		poses[i].append(-rot[1][0]*x - rot[1][1]*y) # y
+		glo_x.append(poses[i][0])
+		glo_y.append(poses[i][1])
+
+
+def listener():
+	global msg, car_x, car_y, car_speed, goal_x, goal_y,loc_y0, loc_y1, loc_y2, loc_y3, stop, yaw, r_flag, goal_type, xx, yy, passed, glo_y, glo_x
+
+	rospy.init_node('cmdvel_listener', anonymous=True)
+	msg = Twist
+	rospy.Subscriber("/odom", Odometry, position) # Get car position
+	rospy.Subscriber("/move_base/TebLocalPlannerROS/teb_poses", PoseArray, localPlan) # Get local planner's global plan
+	rospy.Subscriber("/move_base/GlobalPlanner/plan", Path, globPlan) # Get local planner's global plan
+	rospy.Subscriber("/move_base/goal", MoveBaseActionGoal, goalcall) # Get goal
+	rospy.Subscriber("/goal_type", Int8, getType) # Get goal type
+	rospy.Subscriber("/cmd_vel", Twist, callback)
+	rospy.spin()
+
+if __name__ == '__main__':
+
+		case = 0
+		prev_steer=0
+		goal_x = 0
+		goal_y = 0
+		loc_y0 = 0
+		loc_x0 = 0
+		loc_y1 = 0
+		loc_y2 = 0
+		loc_y3 = 0
+		loc_x3 = 0
+		stop = 1
+		r_flag = 0
+		goal_type = 0
+		xx = -100
+		yy = -100
+		passed = 0
+		glo_y = [0,0,0,0]
+
+
+		listener()

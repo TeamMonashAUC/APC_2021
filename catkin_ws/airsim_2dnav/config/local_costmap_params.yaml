@@ -1,0 +1,13 @@
+local_costmap:
+  global_frame: PhysXCar/odom_local_enu
+  robot_base_frame: front_middle_bumblebee_body
+  update_frequency: 2.0
+  publish_frequency: 2.0
+  rolling_window: true
+  width: 30.0
+  height: 30.0
+  origin_x: 0
+  origin_y: 0
+  resolution: 0.2 
+  plugins:
+    - {name: obstacle_layer,      type: "costmap_2d::ObstacleLayer"}

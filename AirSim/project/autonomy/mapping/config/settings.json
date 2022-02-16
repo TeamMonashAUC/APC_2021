@@ -1,0 +1,37 @@
+{
+    "ClockSpeed": 1,
+    "SettingsVersion": 1.2,
+    "SimMode": "Car",
+    "Vehicles": {
+        "PhysXCar": {
+            "EnableCollisionPassthrogh": true,
+            "EnableCollisions": false,
+            "Sensors": {
+                "Imu": {
+                    "Enabled": true,
+                    "SensorType": 2
+                },
+		"Lidar1": {
+         	    "SensorType": 6,
+		    "Roll": 0, "Pitch": 0, "Yaw" : 0,
+ 		    "PointsPerSecond": 288000,
+		    "RotationsPerSecond": 10,
+		    "Range": 50,
+		    "NumberOfChannels":16,
+		    "VerticalFOVUpper": 15,
+		    "VerticalFOVLower": -15,
+		    "HorizontalFOVStart": -180,
+		    "HorizontalFOVEnd": 180,
+		    "DataFrame": "SensorLocalFrame",
+         	    "Enabled" : true
+    		},
+		"Gps": {
+        	     "SensorType": 3,
+        	     "Enabled" : true
+		}
+            },
+            "VehicleType": "PhysXCar"
+        }
+    },
+    "ViewMode": "SpringArmChase"
+}

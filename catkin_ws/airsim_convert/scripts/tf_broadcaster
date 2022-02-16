@@ -1,0 +1,86 @@
+#! /usr/bin/env python
+
+# Name: Chia Jun Shen
+# Date: 24/2/2021
+# School: Monash University Malaysia
+# Description: Publish transform from odom frame to world_enu frame. 
+#              Otherwise, the odom frame is fixed to world_enu although 
+#              the car has moved.
+# 
+# Comments:    Position and orientation of the car are obtained from the 
+#              "/odom" topic (message of type nav_msgs.msg.Odometry).
+#              The transformation from child (local) frame to parent
+#              (global) frame is broadcasted to "/tf" topic by using
+#              tf.TransformBroadcaster.sendTransform()
+
+import tf
+from tf import TransformBroadcaster, TransformerROS, Transformer
+from nav_msgs.msg import Odometry
+from tf2_msgs.msg import TFMessage
+import rospy
+import numpy as np
+from rospy import Time
+import math
+
+
+def position(xyz):
+    
+    # Get car position and quartenion
+    car_x = xyz.pose.pose.position.x
+    car_y = xyz.pose.pose.position.y
+    x = xyz.pose.pose.orientation.x
+    y = xyz.pose.pose.orientation.y
+    z = xyz.pose.pose.orientation.z
+    w = xyz.pose.pose.orientation.w
+
+    # rospy.loginfo("Position: [x: %f, y: %f, z: %f]" % (car_x, car_y, xyz.pose.pose.position.z))
+    # rospy.loginfo("Orientation: [x: %f, y: %f, z: %f, w: %f]" % (x, y, z, w))
+
+    b = TransformBroadcaster()
+    
+    # Translate and rotate
+    translation = (car_x, car_y, 0)  # Translate to origin
+    if z <= 0:
+        rotation = (y, x, math.sin(math.radians(45) - math.asin(z)), math.cos(math.radians(45) + math.acos(w)))
+    else:
+        rotation = (y, x, math.sin(math.radians(45) - math.asin(z)), math.cos(-math.radians(45) + math.acos(w)))
+
+    # Normalize quartenion to <= 1.0
+    quat_norm = rotation / np.linalg.norm(rotation)
+
+    # rospy.loginfo("Transformed rot: [xq = %f, yq = %f, zq = %f, wq = %f]" % (
+    # quat_norm[0], quat_norm[1], quat_norm[2], quat_norm[3]))
+    
+    
+    #   `sendTransform(self, translation, rotation, time, child, parent)`
+    #
+    #   Broadcast the transformation from child frame to parent frame on ROS topic "/tf"
+    #
+    #   translation - (x,y,z)
+    #   rotation    - (x,y,z,w)
+    #   time        - the time of the transformation (as a rospy.Time())
+    #   child       - local frame
+    #   parent      - global frame
+    b.sendTransform(translation, quat_norm, Time.now(), 'PhysXCar/odom_local_enu', '/world_enu')
+
+
+def frame(msg):
+    rospy.loginfo("frame: %s, child_frame: %s", msg.transforms[0].header.frame_id, msg.transforms[0].child_frame_id)
+
+
+def main():
+    # Initialise a node with the name 'tf_frame'
+    rospy.init_node('tf_frame', anonymous=True) 
+    
+    # Subscribes to the "/odom" topic, which is of type nav_msgs.msg.Odometry
+    # When new messages are received, position is invoked with the messages being its first argument.
+    rospy.Subscriber("/odom", Odometry, position)
+    
+    # rospy.Subscriber("/tf", TFMessage, frame)
+    
+    # Avoid python from exiting unless this node is terminated.
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()

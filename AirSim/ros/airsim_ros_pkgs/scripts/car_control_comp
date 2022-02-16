@@ -1,0 +1,381 @@
+#!/usr/bin/env python
+import rospy
+import roslib
+import tf
+from std_msgs.msg import String
+from move_base_msgs.msg import MoveBaseActionGoal
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+import sensor_msgs
+import sensor_msgs.msg
+import airsim_car_ros_pkgs as air
+import airsim_car_ros_pkgs.msg
+import math
+
+
+def callback(msg):
+	pub = rospy.Publisher('/airsim_node/PhysXCar/car_cmd_body_frame', air.msg.CarCmd, queue_size=0)
+	controls=airsim_car_ros_pkgs.msg.CarCmd()
+
+	b_wheel_base=4
+	rad_factor= -1
+	steer_angle = 0
+	nb = 0
+	adjusted_z = msg.angular.z/rad_factor
+	global case
+	global stop
+	global prev_steer
+	global hit
+	global delay
+
+	######### SETTINGS ##############
+
+	# Other .yaml files updated on github
+
+	# All frequencies: 2.0
+
+	########## SETTINGS END ###########
+
+
+	# Calculate throttle differential and collision recovery.
+	if msg.linear.x >= 0:
+		diff_speed = msg.linear.x - abs(car_speed)
+		hit = 0
+		if case == -1 or car_speed < -0.01:
+			controls.brake = 5
+			controls.is_manual_gear = False
+			controls.gear_immediate = False
+
+			if car_speed >= 0:
+				case = 0
+	else:
+		### Collision recovery - reversing (comment out this else statement and contents to disable reverse, or change hit value in branch statement) ###
+		hit = hit + 1
+		diff_speed = abs(car_speed) - msg.linear.x
+		if hit >= 4: # No. of consecutive messages to register as collision - 4 x 0.5 secs (controller frequency) = 2 secs
+			diff_speed = 0
+			case = -1
+			if car_speed > 0.5:
+				controls.brake = car_speed
+			else:
+				controls.is_manual_gear = True
+				controls.manual_gear = -1
+				controls.gear_immediate = True
+				controls.throttle = 1
+
+
+	# Distance between car and goal (can be simplified just make sure its positive)
+	if goal_x*car_x >= 0:
+		x_diff = abs(goal_x - car_x)
+	else:
+		x_diff = abs(goal_x) + abs(car_x)
+
+	if goal_y*car_y >= 0:
+		y_diff = abs(goal_y - car_y)
+	else:
+		y_diff = abs(goal_y) + abs(car_y)
+
+	diff_radius = math.sqrt(math.pow(x_diff,2) + math.pow(y_diff,2))
+
+
+	### Steering control // Max car steer: 1.0 rad (60 deg) ###
+
+	if car_speed > 0.1:
+
+		# Correcting /cmd_vel output - This was coded to deal with messy steering input, but you can remove it (up to line 156) if you want to start from scratch with steering
+
+		if msg.angular.z == 0:
+
+			# Centering control
+			# if (abs(glo_y1) > 0.05 and abs(glo_y1) < 1.0 and abs(glo_y2) > 0.45 and abs(glo_y2) < 1.2 and abs(glo_y3) > 0.5 and abs(glo_y3) < 2):
+			# 	adjusted_z = 0.2
+
+			# Understeer
+			if (x_diff > 5 and y_diff > 5 and abs(prev_steer) > 0):
+				adjusted_z = prev_steer
+			elif x_diff > 5 and y_diff > 5 and prev_steer == 0:
+				adjusted_z = 1 * abs(glo_y3)/glo_y3
+
+
+		else: # This is to center the car according to the heading (again, to deal with messy input) but its pretty redundant 
+
+			# Assuming goal broken down to parts
+			if ~(x_diff > 3 and y_diff > 3):
+				z_set = 0
+				if abs(yaw) < 0.75 and abs(yaw) > 0.66:
+				    if y_diff < 1:
+				        z_set = 0
+				    elif y_diff <2:
+				        z_set = 0.05*(0.7071 - abs(yaw))/(abs(0.7071 - abs(yaw)))
+				    elif y_diff <3:
+				        z_set = 0.1*(0.7071 - abs(yaw))/(abs(0.7071 - abs(yaw)))
+				elif abs(yaw) < 0.843 and abs(yaw) > 0.537:
+					if y_diff < 1:
+						z_set = 0.05*(0.7071 - abs(yaw))/(abs(0.7071 - abs(yaw)))
+					elif y_diff < 2:
+						z_set = 0.1*(0.7071 - abs(yaw))/(abs(0.7071 - abs(yaw)))
+					elif y_diff < 3:
+						z_set = 0.15*(0.7071 - abs(yaw))/(abs(0.7071 - abs(yaw)))
+				elif abs(yaw) > 0.996 or abs(yaw) < 0.087:
+					if x_diff < 1:
+						z_set = 0
+					elif x_diff < 2:
+						z_set = 0.05*(0.5 - abs(yaw))/(abs(0.5 - abs(yaw)))
+					elif x_diff < 3:
+						z_set = 0.1*(0.5 - abs(yaw))/(abs(0.5 - abs(yaw)))
+				elif abs(yaw) > 0.976 or abs(yaw) < 0.216:
+					if x_diff < 1:
+						z_set = 0.05*(0.5 - abs(yaw))/(abs(0.5 - abs(yaw)))
+					elif x_diff < 2:
+						z_set = 0.1*(0.5 - abs(yaw))/(abs(0.5 - abs(yaw)))
+					elif x_diff < 3:
+						z_set = 0.15*(0.5 - abs(yaw))/(abs(0.5 - abs(yaw)))
+
+				if z_set !=0:
+					if y_diff <3 and yaw >0:
+						adjusted_z = -z_set
+					elif x_diff < 3 and yaw > 0:
+						adjusted_z = -z_set
+
+				# # Oversteer
+				# elif (abs(glo_y3) < 0.06 and abs(glo_y2) < 0.06 and abs(msg.angular.z) > 0.1 and adjusted_z*glo_y1 > 0):
+				# 	# adjusted_z = 0.5*adjusted_z
+				# 	adjusted_z = 0
+				# elif (abs(glo_y3) < 0.6 and abs(glo_y2) < 0.4 and abs(glo_y1) < 0.2 and abs(msg.angular.z) > 0.3 and adjusted_z*glo_y1 > 0):
+				# 	# adjusted_z = 0.3*(abs(adjusted_z)/adjusted_z)
+				# 	adjusted_z = 0
+				# elif (abs(glo_y3) < 0.7 and abs(glo_y2) < 0.5 and abs(glo_y1) < 0.4 and abs(msg.angular.z) > 0.6 and adjusted_z*glo_y1 > 0):
+				# 	adjusted_z = 0
+
+				# # # Countersteer
+				# if (adjusted_z*glo_y1 > 0 and adjusted_z*glo_y2 > 0 and abs(glo_y1) > 0.7 and abs(glo_y2) > 0.9 and abs(glo_y3) > 1):
+				# 	adjusted_z = - 0.5* adjusted_z
+				# if (adjusted_z*glo_y1 > 0 and adjusted_z*glo_y2 > 0 and abs(glo_y1) > 0.4 and abs(glo_y2) > 0.6 and abs(glo_y3) > 0.8):
+				# 	adjusted_z = - 0.5* adjusted_z
+
+		# Applying exponential factor to steering angle based on current speed
+		if adjusted_z != 0:
+			if car_speed < 5:
+				curve = 1
+			elif car_speed < 10: # if the car turns too little at high speeds just set the curve to 1
+				# curve = 1*math.exp(-math.pow(abs(car_speed - 5),0.3) -0.8) + 0.5
+				curve = 1
+			else:
+				curve = 1
+
+			steer_angle = adjusted_z*curve
+
+			# Factor to control settling time for desired steering angle - it will never reach the desired value but seems to work well,
+			# you can completely change the algorithm up to line 195
+
+			factor1 = 0.6 # Same sign steering +
+			factor2 = 0.7 # Same sign steering -
+			factor3 = 0.7 # Opposite sign
+
+			# Apply the steering according to the angular velocity - the if staments can be reduced, but i left them like that to apply different factors to them
+			if steer_angle*prev_steer >= 0:
+				if abs(steer_angle) >= abs(prev_steer):
+					steer_diff = steer_angle - prev_steer
+					controls.steering = prev_steer + factor1*(steer_diff)
+				else:
+					steer_diff = prev_steer - steer_angle
+					controls.steering = prev_steer - factor2*(steer_diff)
+
+			else:
+				steer_diff = abs(steer_angle) + abs(prev_steer)
+				if steer_angle >= prev_steer:
+					controls.steering = prev_steer + factor3*(steer_diff)
+				else:
+					controls.steering = prev_steer - factor3*(steer_diff)
+
+		# Control for zero angle input
+		elif adjusted_z == 0 and prev_steer != 0:
+			controls.steering = 0.2*(prev_steer)
+
+
+	# prev_steer global variable that saves the current steering for comparision in the next loop
+	prev_steer = controls.steering
+
+
+	# Throttle and brake control
+	if case != -1:
+		if car_speed == 0 and stop == 0 and msg.linear.x > 0: # Start moving
+			case =0
+			controls.throttle = 0.1
+
+
+		elif diff_radius > 2 and stop == 0: # Outside of goal radius
+			if abs(glo_y3) < 3 and abs(glo_x3) > 5 and abs(controls.steering) < 0.3 and (x_diff> 5 or y_diff > 5): # For higher top speeds, ignore /cmd_vel slow velocity input
+				case = 3
+				delay = 0
+				if abs(glo_x3) > 10:
+					max_speed = 9
+					fct = 1
+				else:
+					max_speed = 6
+					fct = 1.5
+				if (car_speed < max_speed):
+					controls.throttle=fct*math.sqrt(math.pow((max_speed - car_speed)/10,0.9))
+
+			else: # Controlling using /cmd_vel velocity input
+				if diff_speed >=0:
+					case = 1
+					delay = 0
+					controls.throttle = 1*math.sqrt(math.pow(diff_speed/10,0.9))
+
+				elif car_speed > 4 and x_diff > 3 and y_diff > 3: # Brake if approaching a corner - This uses the assumption that the road is either perfectly x or y
+					case = 2
+					if car_speed < 7:
+						controls.brake =1.5*math.exp(-math.pow(abs(car_speed/10),0.7) -2.5)
+					else:
+						controls.brake = car_speed/10
+
+				elif msg.linear.x >= 0.1 and car_speed > 2: # Slow down the car. >= 0.1 because the current planner has random momentary 0's so not easy to differentiate
+				 	case = 4
+					delay = delay + 1
+					if delay >= 4 or (x_diff < 5 and y_diff < 5): # Delay causes car not to brake immediately to improve smoothness
+						controls.brake = 2.5*math.pow(abs(diff_speed/10),2)
+
+		else:  # Full brake when radius less than 2 m
+			case = 5
+			stop = 1
+			controls.brake = 1
+
+		# Ignore negative values and truncate values > 1
+		if controls.throttle < 0 or controls.brake > 0 :
+			controls.throttle = 0
+
+		if controls.throttle > 1:
+			controls.throttle = 1
+
+		if controls.brake > 1:
+			controls.brake = 1
+
+		if abs(controls.steering) > 1:
+			controls.steering = abs(controls.steering)/controls.steering
+
+
+
+	pub.publish(controls)
+	rospy.loginfo("Publishing: [State: %d,Throttle:  %f,Brake: %f,linear_x: %f,Speed_cur: %f, angular_z: %f, steer_angle: %f, Steering: %f,y0: %f,y1: %f,y2: %f,y_off: %f,y3: %f, x3: %f, x_diff: %f, y_diff: %f]" %(case, controls.throttle, controls.brake,msg.linear.x,car_speed,-msg.angular.z,steer_angle,controls.steering,glo_y0,glo_y1, glo_y2,off_y,glo_y3,glo_x3,x_diff, y_diff))
+
+def position(xyz):
+	global car_x
+	global car_y
+	global yaw
+	global car_speed
+
+	# Frame at center
+	# car_x = xyz.pose.pose.position.x + 84
+	# car_y = xyz.pose.pose.position.y + 129
+
+	# Frame at origin
+	car_x = xyz.pose.pose.position.x
+	car_y = xyz.pose.pose.position.y
+
+	yaw = xyz.pose.pose.orientation.z
+	car_speed = math.sqrt(math.pow(xyz.twist.twist.linear.x,2) + math.pow(xyz.twist.twist.linear.y,2))
+
+
+def goalcall(dest):
+	global goal_x
+	global goal_y
+	global stop
+
+	stop = 0 # Global flag that causes the car to move when a new goal is set
+	goal_x = dest.goal.target_pose.pose.position.x
+	goal_y = dest.goal.target_pose.pose.position.y
+
+
+def plan(ofst): # local planner's local plan, not used currently
+	global off_x
+	global off_y
+	global offd_z
+	sizePose = len(ofst.poses)
+	third = int(math.floor(sizePose/3))
+	third2 = int(math.ceil(2*sizePose/3))
+
+	off_x = ofst.poses[sizePose - 1].pose.position.x
+	off_y = ofst.poses[sizePose - 1].pose.position.y
+	offd_z = ofst.poses[sizePose - 1].pose.orientation.z
+
+
+def globPlan(path): # local planner's global plan (portion of plan you see created by global planner on rviz)
+	global glo_y0
+	global glo_y1
+	global glo_y2
+	global glo_y3
+	global glo_x3
+
+	# This is an array, 0 is the first point, sizePose-1 is the last point, third is 1/3 point and third2 is 2/3 point
+	sizePose = len(path.poses)
+	third = int(math.floor(sizePose/3))
+	third2 = int(math.ceil(2*sizePose/3))
+
+	# The frame is fixed on the path. So y values give the offset of the car from the path, which can be used to identify turns for larger y values
+	# x values give the linear distance of the car to that specific point on the path, so is usually quite high until you reach a goal
+	glo_y0 = path.poses[0].pose.position.y
+	glo_y1 = path.poses[third].pose.position.y
+	glo_y2 = path.poses[third2].pose.position.y
+	glo_y3 = path.poses[sizePose-1].pose.position.y
+
+	glo_x3 = path.poses[sizePose-1].pose.position.x
+
+
+def listener():
+	global msg
+	global car_x
+	global car_y
+	global car_speed
+	global goal_x
+	global goal_y
+	global glo_y0
+	global glo_y1
+	global glo_y2
+	global glo_y3
+	global glo_x3
+	global stop
+	global steer
+	global off_x
+	global off_y
+	global offd_z
+	global yaw
+	global hit
+	global delay
+
+
+	rospy.init_node('cmdvel_listener', anonymous=True)
+
+	msg = Twist
+	rospy.Subscriber("/odom", Odometry, position) # Get car position
+	rospy.Subscriber("/move_base/TrajectoryPlannerROS/global_plan", Path, globPlan) # Get local planner's global plan
+	rospy.Subscriber("/move_base/TrajectoryPlannerROS/local_plan", Path, plan) # Get local planner's local plan
+	rospy.Subscriber("/move_base/goal", MoveBaseActionGoal, goalcall) # Get goal
+	rospy.Subscriber("/cmd_vel", Twist, callback)
+	rospy.spin()
+
+if __name__ == '__main__':
+
+		hit = 0
+		case = 0
+		prev_steer=0
+		prev_z = 0
+		goal_x = 0
+		goal_y = 0
+		glo_y0 = 0
+		glo_x0 = 0
+		glo_y1 = 0
+		glo_y2 = 0
+		glo_y3 = 0
+		glo_x3 = 0
+		off_x = 0
+		off_y = 0
+		offd_z = 0
+		stop = 1
+		take = 0
+		delay = 0
+
+
+		listener()

@@ -1,0 +1,300 @@
+#!/usr/bin/env python
+import rospy
+import roslib
+import tf
+from std_msgs.msg import String
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+import sensor_msgs
+import sensor_msgs.msg
+import airsim_ros_pkgs as air
+import airsim_ros_pkgs.msg
+import math
+
+
+def callback(msg):
+	pub = rospy.Publisher('/airsim_node/drone_1/car_cmd', air.msg.CarControls, queue_size=0)
+	controls=airsim_ros_pkgs.msg.CarControls()
+
+	b_wheel_base=4
+	rad_factor= 1
+	steer_angle = 0
+	adjusted_z = msg.angular.z/rad_factor
+	global case
+	global stop
+	global prev_steer
+	global hit
+
+	######### SETTINGS ##############
+	# ~~costmap_common_params.yaml ~~
+	# footprint: [[-0.9, -1], [0.9, -1], [0.9, 1], [-0.9, 1]]
+	# footprint_padding: 0
+	# cost_scaling_factor: 3
+	# inflation_radius: 2.5
+	# obstacle range (lidar, depth): 15.0
+
+	# ~~base_local_planner_params.yaml ~~
+	# max_vel_x: 20.0
+	# acc_lim_theta: 5
+	# acc_lim_x: 2.5
+	# acc_lim_y: 2.5
+
+	# All controller/publisher: 5.0
+	# All update/planner frequency: 2.0
+
+	########## SETTINGS END ###########
+
+
+	# Calculate throttle differential and collision recovery.
+	if msg.linear.x >= 0:
+		diff_speed = msg.linear.x - abs(car_speed)
+		hit = 0
+		if case == -1 or car_speed < -0.01:
+			controls.brake = 5
+			controls.manual = False
+			controls.gear_immediate = False
+
+			if car_speed >= 0:
+				case = 0
+	else:
+		### Collision recovery - reversing (comment out this else statement and contents to disable reverse, or change hit value in branch statement) ###
+		hit = hit + 1
+		diff_speed = abs(car_speed) - msg.linear.x
+		if hit == 10: # No. of consecutive messages to register as collision - 10 x 0.2 secs - 2 secs
+			diff_speed = 0
+			case = -1
+			if car_speed > 0.5:
+				controls.brake = car_speed
+			else:
+				controls.manual = True
+				controls.manual_gear = -1
+				controls.gear_immediate = True
+				controls.throttle = 1
+
+
+
+
+	### Steering control // Max Car steer: 1.0 rad (60 deg) ###
+
+	if car_speed > 0.1:
+
+		# Correcting /cmd_vel output for tight turns
+
+		if msg.angular.z == 0:
+
+			# Centering control
+			if (abs(glo_y1) > 0.05 and abs(glo_y1) < 1.0 and abs(glo_y2) > 0.45 and abs(glo_y2) < 1.2 and abs(glo_y3) > 0.5 and abs(glo_y3) < 2):
+				adjusted_z = 0.2
+
+			if glo_y1 < 0:
+				adjusted_z = -adjusted_z
+
+		# Applying exponential factor to steering angle based on current speed - reverted temporarily
+		if adjusted_z != 0:
+			if car_speed < 5:
+				curve = 1
+			elif car_speed < 10:
+				curve = 1*math.exp(-math.pow(abs(car_speed - 5),0.3) -0.8) + 0.5
+			else:
+				curve = 1
+
+			steer_angle = adjusted_z*curve
+
+			# Factor to control settling time for desired steering angle
+
+			factor1 = 0.3 # Same sign steering +
+			factor2 = 0.6 # Same sign steering -
+			factor3 = 0.7 # Opposite sign
+
+			if steer_angle*prev_steer >= 0:
+				if abs(steer_angle) >= abs(prev_steer):
+					steer_diff = steer_angle - prev_steer
+					controls.steering = prev_steer + factor1*(steer_diff)
+				else:
+					steer_diff = prev_steer - steer_angle
+					controls.steering = prev_steer - factor2*(steer_diff)
+
+			else:
+				steer_diff = abs(steer_angle) + abs(prev_steer)
+				if steer_angle >= prev_steer:
+					controls.steering = prev_steer + factor3*(steer_diff)
+				else:
+					controls.steering = prev_steer - factor3*(steer_diff)
+
+		# Control for zero angle input
+		elif adjusted_z == 0 and prev_steer != 0:
+			controls.steering = 0.2*(prev_steer)
+
+
+	prev_steer = controls.steering
+
+	# Distance between car and goal
+	if goal_x*car_x >= 0:
+		x_diff = abs(goal_x - car_x)
+	else:
+		x_diff = abs(goal_x) + abs(car_x)
+
+	if goal_y*car_y >= 0:
+		y_diff = abs(goal_y - car_y)
+	else:
+		y_diff = abs(goal_y) + abs(car_y)
+
+	diff_radius = math.sqrt(math.pow(x_diff,2) + math.pow(y_diff,2))
+
+	# Throttle and brake control
+	if case != -1:
+		if car_speed == 0 and stop == 0:
+			case =0
+			controls.throttle=3*diff_speed
+
+		elif diff_radius > 2 and stop == 0:
+			if abs(glo_y3) < 1.5 and abs(glo_x3) > 5 and abs(controls.steering) < 0.3: # For higher top speeds
+				case = 3
+				if abs(glo_x3) > 10:
+					max_speed = 10
+				else:
+					max_speed = 7
+				controls.throttle = 0.5*(max_speed - car_speed)
+			else:
+				if diff_speed >=0:
+					case = 1
+					if car_speed > 2.5:
+						if abs(controls.steering) >= 0.5:
+							controls.brake =0.2*car_speed
+
+						elif (abs(glo_y1) > 0.2 and abs(glo_y2) > 2 and abs(glo_y3) > 3):
+							if car_speed < 7:
+								controls.brake =1*math.exp(-math.pow(abs(car_speed),0.7) -2.5)
+							else:
+								controls.brake =0.1*car_speed + 3.4
+
+					if controls.brake == 0:
+						controls.throttle = 3*diff_speed
+
+				elif msg.linear.x >= 0.1 and car_speed > 1:
+				 	case = 2
+					controls.brake = 1.5*abs(diff_speed)
+
+		else:  # Brake when radius less than 2 m
+			case = 4
+			stop = 1
+			controls.brake = 2*(car_speed)
+
+		if controls.throttle < 0:
+			controls.throttle = 0
+
+
+
+	pub.publish(controls)
+	#rospy.loginfo("Publishing: [State: %f,Throttle:  %f,Brake: %f,linear_x: %f,Speed_cur: %f, angular_z: %f,Steering: %f,prev_steer: %f,steer_angle: %f, x_diff: %f, y_diff: %f]" %(case, controls.throttle, controls.brake,msg.linear.x,car_speed,msg.angular.z, controls.steering,prev_steer,steer_angle,x_diff, y_diff))
+	rospy.loginfo("Publishing: [State: %d,Throttle:  %f,Brake: %f,linear_x: %f,Speed_cur: %f, angular_z: %f, steer_angle: %f, Steering: %f,y0: %f,y1: %f,y2: %f,y_off: %f,y3: %f, x3: %f, x_diff: %f, y_diff: %f]" %(case, controls.throttle, controls.brake,msg.linear.x,car_speed,msg.angular.z,steer_angle,controls.steering,glo_y0,glo_y1, glo_y2,off_y,glo_y3,glo_x3,x_diff, y_diff))
+
+def position(xyz):
+	global car_x
+	global car_y
+	global yaw
+	car_x = xyz.pose.pose.position.y
+	car_y = xyz.pose.pose.position.x
+	yaw = xyz.pose.pose.orientation.z
+
+def car_state(state):
+	global car_speed
+	car_speed = state.speed
+
+def goalcall(dest):
+	global goal_x
+	global goal_y
+	global stop
+
+	stop = 0
+	goal_x = dest.pose.position.x
+	goal_y = dest.pose.position.y
+
+def plan(ofst):
+	global off_x
+	global off_y
+	global offd_z
+	sizePose = len(ofst.poses)
+	third = int(math.floor(sizePose/3))
+	third2 = int(math.ceil(2*sizePose/3))
+
+	off_x = ofst.poses[sizePose - 1].pose.position.x
+	off_y = ofst.poses[sizePose - 1].pose.position.y
+	offd_z = ofst.poses[sizePose - 1].pose.orientation.z
+	#rospy.loginfo("data: [x0 = %f, y0= %f,x1= %f, y1= %f,z1= %f, x2= %f, y2 =%f, z2= %f, x3 = %f, y3 = %f, z3= %f]" %(ofst.poses[0].pose.position.x, ofst.poses[0].pose.position.y,ofst.poses[third].pose.position.x,ofst.poses[third].pose.position.y,ofst.poses[third].pose.orientation.z,ofst.poses[third2].pose.position.x, ofst.poses[third2].pose.position.y,ofst.poses[third2].pose.orientation.z, ofst.poses[sizePose-1].pose.position.x, ofst.poses[sizePose-1].pose.position.y,ofst.poses[sizePose-1].pose.orientation.z))
+
+def globPlan(path):
+	global glo_y0
+	global glo_y1
+	global glo_y2
+	global glo_y3
+	global glo_x3
+	sizePose = len(path.poses)
+	third = int(math.floor(sizePose/3))
+	third2 = int(math.ceil(2*sizePose/3))
+
+	glo_y0 = path.poses[0].pose.position.y
+	glo_y1 = path.poses[third].pose.position.y
+	glo_y2 = path.poses[third2].pose.position.y
+	glo_y3 = path.poses[sizePose-1].pose.position.y
+
+	glo_x3 = path.poses[sizePose-1].pose.position.x
+
+	#rospy.loginfo("data: [x0 = %f, y0= %f, z0 = %f, x1= %f, y1= %f,z1= %f, x2= %f, y2 =%f, z2= %f, x3 = %f, y3 = %f, z3= %f]" %(path.poses[0].pose.position.x, path.poses[0].pose.position.y,path.poses[0].pose.orientation.z,path.poses[third].pose.position.x,path.poses[third].pose.position.y,path.poses[third].pose.orientation.z,path.poses[third2].pose.position.x, path.poses[third2].pose.position.y,path.poses[third2].pose.orientation.z, path.poses[sizePose-1].pose.position.x, path.poses[sizePose-1].pose.position.y,path.poses[sizePose-1].pose.orientation.z))
+
+def listener():
+	global msg
+	global car_x
+	global car_y
+	global car_speed
+	global goal_x
+	global goal_y
+	global glo_y0
+	global glo_y1
+	global glo_y2
+	global glo_y3
+	global glo_x3
+	global stop
+	global steer
+	global off_x
+	global off_y
+	global offd_z
+	global yaw
+	global hit
+
+
+	rospy.init_node('cmdvel_listener', anonymous=True)
+
+	msg = Twist
+	rospy.Subscriber("/airsim_node/drone_1/odom_local_ned", Odometry, position) # Get car position
+	rospy.Subscriber("/airsim_node/drone_1/car_state", air.msg.CarState, car_state) # Get car state (speed)
+	rospy.Subscriber("/move_base/TrajectoryPlannerROS/global_plan", Path, globPlan) # Get global plan
+	rospy.Subscriber("/move_base/TrajectoryPlannerROS/local_plan", Path, plan) # Get local plan
+	rospy.Subscriber("/move_base_simple/goal", PoseStamped, goalcall) # Get goal
+	rospy.Subscriber("/cmd_vel", Twist, callback)
+	rospy.spin()
+
+if __name__ == '__main__':
+
+		hit = 0
+		case = 0
+		prev_steer=0
+		prev_z = 0
+		goal_x = 0
+		goal_y = 0
+		glo_y0 = 0
+		glo_x0 = 0
+		glo_y1 = 0
+		glo_y2 = 0
+		glo_y3 = 0
+		glo_x3 = 0
+		off_x = 0
+		off_y = 0
+		offd_z = 0
+		stop = 0
+		take = 0
+
+
+		listener()

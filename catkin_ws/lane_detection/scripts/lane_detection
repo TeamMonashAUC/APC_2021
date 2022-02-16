@@ -1,0 +1,311 @@
+#!/usr/bin/env python
+import rospy
+from std_msgs.msg import String, Header
+import cv2
+import numpy as np
+from sensor_msgs.msg import Image, PointCloud, Imu
+from geometry_msgs.msg import Point32
+from nav_msgs.msg import Odometry
+from cv_bridge import CvBridge
+class Publisher:
+    def __init__(self):
+        self.counter_r = 0  # counter increases when right lane not detected
+        self.counter_l = 0  # counter increases when left lane not detected
+        self.msg = PointCloud()
+        self.msg_length = 1000
+        self.right_fitx = []
+        self.left_fitx = []
+    def callback(self, ros_img):
+        pub = rospy.Publisher("/lane_image", Image, queue_size=10)
+        pub2 = rospy.Publisher("lane_image2", Image, queue_size=10)
+        pub_plc = rospy.Publisher('/lane_points', PointCloud, queue_size=10)
+        bridge = CvBridge()  # important for conversion between ros image and cv2 image
+        img = bridge.imgmsg_to_cv2(ros_img)
+        IMAGE_H = img.shape[0]
+        IMAGE_W = img.shape[1]
+        c_0 = 150
+        discard_pixels = 150
+        #rospy.loginfo("h: %f, w: %f", IMAGE_H, IMAGE_W)
+        # following 7 lines transforms image to bird-eye view
+        src = np.float32([[c_0, IMAGE_H], [IMAGE_W - c_0, IMAGE_H], [c_0, 70], [IMAGE_W - c_0, 70]])
+        dst = np.float32([[IMAGE_W/2-40, IMAGE_H], [IMAGE_W/2+40, IMAGE_H], [0, 250], [IMAGE_W, 250]])
+        M = cv2.getPerspectiveTransform(src, dst)  # The transformation matrix
+        img = img[IMAGE_H-500:IMAGE_H, 0:IMAGE_W]  # Apply np slicing for ROI crop
+        warped_img = cv2.warpPerspective(img, M, (IMAGE_W, IMAGE_H))  # Image warping
+        #mask=np.all(warped_img==(90, 119, 155), axis=-1)
+        #warped_img[~mask] = (255, 255, 255)
+        #ros_image = bridge.cv2_to_imgmsg(warped_img, encoding="passthrough")
+        #rospy.loginfo(warped_img)
+        #fgbg = cv2.createBackgroundSubtractorMOG2()
+        #masked_image = fgbg.apply(img)
+        #masked_image[masked_image == 127] = 0
+        rgb_planes = cv2.split(warped_img)
+        result_norm_planes = []
+        for plane in rgb_planes:
+            dilated_img = cv2.dilate(plane, np.ones((7, 7), np.uint8))
+            bg_img = cv2.medianBlur(dilated_img, 21)
+            diff_img = 255 - cv2.absdiff(plane, bg_img)
+            norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+            result_norm_planes.append(norm_img)
+        result_norm = cv2.merge(result_norm_planes)
+        #shadow=result_norm(warped_img)
+        #following 20 lines do image processing on warped_image, identify the edges and points of lane
+        hsv = cv2.cvtColor(result_norm, cv2.COLOR_BGR2HSV)
+        sensitivity = 180  # range of sensitivity=[90,150]
+        lower_white = np.array([60, 60, 60])
+        upper_white = np.array([255, 255, 255])
+        kernel = np.ones((5, 5), np.uint8)
+        white_mask = cv2.inRange(hsv, lower_white, upper_white)
+        # white_mask = cv2.erode(white_mask, kernel, iterations=10)
+        # white_mask = cv2.dilate(white_mask, kernel, iterations=10)
+        # mask = np.zeros_like((canny.shape[0], canny.shape[1]))  # create a black image with same dimension as canny
+        # mask.fill(255)  # make it a white image by replacing 0 with 255
+        whitehsvthresh = cv2.bitwise_and(warped_img, warped_img, mask=white_mask)
+        gray = cv2.cvtColor(whitehsvthresh, cv2.COLOR_BGR2GRAY)
+        thresh, bw = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
+        bw = 255 - bw
+        global left_a, left_b, left_c, right_a, right_b, right_c
+        left_a, left_b, left_c = [], [], []
+        right_a, right_b, right_c = [], [], []
+        blur = cv2.GaussianBlur(bw, (5, 5), 0)
+        canny = cv2.Canny(blur, 0, 200)
+        #height, width = canny.shape
+        # discard top
+        #canny[1: discard_pixels, :] = 0
+        #h = height - discard_pixels
+        # discard bottom
+        #canny[600: height, :] = 0
+        # discard left
+        #canny[500: height, 1: 600] = 0
+        #canny[0: height, 1: discard_pixels] = 0
+        # discard right
+        #canny[500:height, 700: width] = 0
+        #canny[0: height, (width-discard_pixels): width] = 0
+        right_edges = cv2.Canny(whitehsvthresh, 0, 200)
+        height, width = right_edges.shape
+        right_edges[0:height, 0:100] = 0
+        right_edges[0:height, width-100:width] = 0
+        right_edges[500:height, 0:300] = 0
+        right_edges[500:height, width-200:width] = 0
+        right_edges[0:250, :] = 0
+        right_edges[height-300:height, :] = 0
+        #right_edges = right_edges[0:500, :]
+        out_img, curves, lanes, ploty_l, ploty_r, left_detect, right_detect = self.sliding_window(right_edges)  #s liding_window identify the coordinates of points
+        left_lane, right_lane = self.draw_lanes(warped_img, curves[0], curves[1], left_detect, right_detect)
+        lane_points = left_lane + right_lane
+        # following two lines publish image to rviz, used for debugging
+        ros_image = bridge.cv2_to_imgmsg(out_img, encoding="passthrough")
+        ros_image2 = bridge.cv2_to_imgmsg(right_edges, encoding="passthrough")
+        self.pub_plc(IMAGE_W, lane_points, pub_plc)
+        pub.publish(ros_image)
+        pub2.publish(ros_image2)
+
+
+    def sliding_window(self, img, nwindows=9, margin=200, minpix=40, maxpix=500, draw_windows=True):
+        # uses histogram method to detect lanes. Reference: https://www.hackster.io/kemfic/curved-lane-detection-34f771
+        left_fit_ = np.empty(3)
+        right_fit_ = np.empty(3)
+        out_img = np.dstack((img, img, img)) * 255
+        histogram = np.sum(img[img.shape[1]:, :], axis=0)
+        # find peaks of left and right halves
+        midpoint = int(histogram.shape[0]/2)
+        leftx_base = np.argmax(histogram[:midpoint])
+        rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+        # Set height of windows
+        window_height = np.int(img.shape[0] / nwindows)
+        # Identify the x and y positions of all nonzero pixels in the image
+        nonzero = img.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        # Current positions to be updated for each window
+        #rospy.loginfo(img.shape[1])
+        leftx_current = leftx_base
+        rightx_current = rightx_base
+        #leftx_current = img.shape[0] - 800
+        #rightx_current = img.shape[0] + 50
+        # Create empty lists to receive left and right lane pixel indices
+        left_lane_inds = []
+        right_lane_inds = []
+        c = 70  # adjust c or margin to adjust window position (see out_img)
+        lane_l_detect = 0  # counter for how many windows detect left lane
+        lane_r_detect = 0  # counter for how many windows detect right lane
+        left_top = 0
+        left_bottom = 0
+        right_top = 0
+        right_bottom = 0
+        # Step through the windows one by one
+        for window in range(nwindows):
+            # Identify window boundaries in x and y (and right and left)
+            win_y_low = img.shape[0] - (window + 1) * window_height
+            win_y_high = img.shape[0] - window * window_height
+            win_xleft_low = leftx_current - margin + c
+            win_xleft_high = leftx_current + margin + c
+            win_xright_low = rightx_current - margin + c
+            win_xright_high = rightx_current + margin + c
+            # Draw the windows on the visualization image
+            if draw_windows == True:
+                cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high),
+                              (100, 255, 255), 3)
+                cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high),
+                              (100, 255, 255), 3)
+            # Identify the nonzero pixels in x and y within the window
+            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                              (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+                               (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+            left_lane_inds.append(good_left_inds)
+            right_lane_inds.append(good_right_inds)
+            rospy.loginfo("window: %f, len: %f", window, len(good_right_inds))
+            # If you found > minpix pixels, recenter next window on their mean position
+            if len(good_left_inds) > minpix and  len(good_left_inds) < maxpix: #and np.int(np.mean(nonzerox[good_left_inds])) < img.shape[0]:
+                leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+                left_top = win_y_high
+                if left_bottom == 0:
+                    left_bottom = win_y_low
+
+                lane_l_detect += 1
+            if len(good_right_inds) > minpix and len(good_right_inds) < maxpix: #and np.int(np.mean(nonzerox[good_right_inds])) > img.shape[0]:
+                rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+                rospy.loginfo(window)
+                right_top = win_y_high
+                if right_bottom == 0:
+                    right_bottom = win_y_low
+                #rospy.loginfo(right_bottom)
+                lane_r_detect += 1
+
+        # Concatenate the arrays of indices
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+        # Extract left and right line pixel positions
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds]
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
+        ploty_l = np.linspace(left_top, left_bottom, img.shape[0])
+        ploty_r = np.linspace(right_top, right_bottom, img.shape[0])
+        # if more than lane_detect_thres windows detected lane, only can consider lane is detected
+        lane_detect_thres = 3  # threshold to consider lane is detected
+        grad_thres = 4  # threshold to filter out lanes that have too large gradient
+        if len(leftx) != 0 and lane_l_detect > lane_detect_thres:
+            # Fit a second order polynomial to each
+            left_detect = 1
+            left_fit = np.polyfit(lefty, leftx, 2)
+            grad = 2 * left_fit[0] * ploty_l + left_fit[1]
+            max_grad = max(abs(grad))
+            rospy.loginfo("max gradient of left: %f", max_grad)
+            # make sure maximum gradient of line is not too big
+            if max_grad < grad_thres:
+                left_a.append(left_fit[0])
+                left_b.append(left_fit[1])
+                left_c.append(left_fit[2])
+                left_fit_[0] = np.mean(left_a[-10:])
+                left_fit_[1] = np.mean(left_b[-10:])
+                left_fit_[2] = np.mean(left_c[-10:])
+                left_fitx = left_fit_[0] * ploty_l ** 2 + left_fit_[1] * ploty_l + left_fit_[2]
+                self.left_fitx = left_fitx  # store the latest coordinates of left lane
+                out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 100]
+            else:  # if the maximum gradient is too big, do not use the line
+                left_fitx = 0
+                left_fit_ = 0
+                left_detect = 0
+        # this else if statement is to use old detected lane if no lane is detected because camera cannot capture it. This is because
+        # although camera cannot capture the lane, the lane is still there.
+        #    left_fitx = self.left_fitx
+        #    left_fit_ = 0
+        #    left_detect = 1
+        #    self.counter_l += 1
+        else:
+            left_fitx = 0
+            left_fit_ = 0
+            left_detect = 0
+            self.counter_l = 0
+            self.left_fitx = []
+        # same operation with left lane
+        if len(rightx) != 0 and lane_r_detect > lane_detect_thres:
+            right_detect = 1
+            right_fit = np.polyfit(righty, rightx, 2)
+            grad = 2*right_fit[0]*ploty_r+right_fit[1]
+            max_grad = max(abs(grad))
+            rospy.loginfo("max gradient of right: %f", max_grad)
+            if max_grad < grad_thres:
+                right_a.append(right_fit[0])
+                right_b.append(right_fit[1])
+                right_c.append(right_fit[2])
+                right_fit_[0] = np.mean(right_a[-10:])
+                right_fit_[1] = np.mean(right_b[-10:])
+                right_fit_[2] = np.mean(right_c[-10:])
+                right_fitx = right_fit_[0] * ploty_r ** 2 + right_fit_[1] * ploty_r + right_fit_[2]
+                self.right_fitx = right_fitx
+                # Generate x and y values for plotting
+                out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 100, 255]
+            else:
+                right_fitx = 0
+                right_fit_ = 0
+                right_detect = 0
+        #elif len(self.right_fitx) != 0 and self.counter_r < 10:
+        #    right_fitx = self.right_fitx
+        #    right_fit_ = 0
+        #    right_detect = 1
+        #    self.counter_r += 1
+        else:
+            right_fitx = 0
+            right_fit_ = 0
+            right_detect = 0
+            self.counter_r = 0
+            self.right_fitx = []
+        return out_img, (left_fitx, right_fitx), (left_fit_, right_fit_), ploty_l, ploty_r, left_detect, right_detect
+
+    def draw_lanes(self, img, left_fit, right_fit, left_detect, right_detect):
+        # this function draw lanes on img for visualisation
+        ploty = np.linspace(0, img.shape[0] - 1, img.shape[0])
+        #rospy.loginfo(left_detect)
+        if left_detect != 0:
+            left = np.array([np.transpose(np.vstack([left_fit, ploty]))])
+            cv2.fillPoly(img, np.int_(left), (0, 200, 255))
+            left = left.tolist()  # convert array to list for easier data extraction
+        else:
+            left = [[]]
+        if right_detect != 0:
+            right = np.array([np.flipud(np.transpose(np.vstack([right_fit, ploty])))])
+            cv2.fillPoly(img, np.int_(right), (0, 200, 255))
+            right = right.tolist()
+        else:
+            right = [[]]
+        return left, right
+    def pub_plc(self, image_w, lane_points, pub_plc):
+        # following 19 lines shows how to publish pointcloud data
+        self.msg_length = sum(len(lane) for lane in lane_points)
+        self.msg.points = [Point32() for i in range(self.msg_length)]
+        self.msg.header = Header()
+        self.msg.header.stamp = rospy.Time.now()
+        self.msg.header.frame_id = "front_middle_bumblebee_body"
+        i = 0
+        for lr in lane_points:  # lane points have points for left lane and right lane
+            if len(lr) == 0:  # if right lane or left lane is not detected
+                continue
+            for lane in lr:
+                # convert the coordinates in image to be respect to the car
+                dx = 300  # adjust to shift pointcloud up and down
+                x_factor = 25  # adjust to change length of pointcloud
+                y_factor = 70  # adjust to change width of lane
+                x = -(lane[1] - dx) / x_factor
+                y = -(lane[0] - float(image_w) / 2.5) / y_factor
+                self.msg.points[i].x = x
+                self.msg.points[i].y = y
+                self.msg.points[i].z = 0
+                i += 1
+        pub_plc.publish(self.msg)
+        rospy.loginfo("Published")
+def listener():
+    global ros_img
+    global msg
+    global car_x
+    global car_y
+    car = Publisher() #initialize class
+    rospy.init_node('lane_detection_node', anonymous=True)
+    ros_img = Image
+    rospy.Subscriber("/airsim_node/PhysXCar/front_right_bumblebee/Scene", Image, car.callback)
+    rospy.spin()
+
+if __name__ == '__main__':
+    listener()

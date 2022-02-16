@@ -1,0 +1,21 @@
+#!/usr/bin/env python
+import rospy
+import message_filters
+from sensor_msgs.msg import Image, CameraInfo
+
+def callback(image, camera_info):
+    image.header.stamp = camera_info.header.stamp
+    pub_image = rospy.Publisher('/airsim_node/PhysXCar/front_middle_bumblebee_sync/DepthPlanner', Image, queue_size=10)
+    pub_info = rospy.Publisher('/airsim_node/PhysXCar/front_middle_bumblebee_sync/camera_info', CameraInfo, queue_size=10)
+    pub_image.publish(image)
+    pub_info.publish(camera_info)
+    rospy.loginfo("%s" % image.header.frame_id)
+def listener():
+    rospy.init_node('synchronizer')
+    image_sub = message_filters.Subscriber('/airsim_node/PhysXCar/front_middle_bumblebee/DepthPlanner', Image)
+    info_sub = message_filters.Subscriber('/airsim_node/PhysXCar/front_middle_bumblebee/DepthPlanner/camera_info', CameraInfo)
+    ts = message_filters.ApproximateTimeSynchronizer([image_sub, info_sub], 10, 0.1, allow_headerless=True)
+    ts.registerCallback(callback)
+    rospy.spin()
+if __name__=="__main__":
+    listener()

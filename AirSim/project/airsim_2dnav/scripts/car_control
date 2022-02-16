@@ -1,0 +1,253 @@
+#!/usr/bin/env python
+import rospy
+from std_msgs.msg import String, Float64
+from geometry_msgs.msg import Vector3
+from nav_msgs.msg import Odometry
+import airsim_car_ros_pkgs as air
+import airsim_car_ros_pkgs.msg
+import math
+
+class Control:
+	def __init__(self):
+		# Control parameters
+		self.power = 1.1
+		self.vmax = 16 # Top Speed at Straights
+		self.a_vmin = 4.5 # Min speed to accelerate to on straights
+		self.a_fvmax = 0.9 # Acceleration factor on straights
+		self.vslow = 12 # Top speed when slowing down at straights before corners
+		self.vc_atk = 6 # Cornering attack velocity
+		self.vc_ext = 6 # Cornering exit velocity @ car_speed > self.vc_ext1[1], or if self.vc_ext1[1] == 0 then this is the exit velocity at all speeds
+		self.v3pD = 4 # 3p-D velocity
+		self.v3pR = 10 # 3p-R velocity
+
+		# Initialize method variables
+		self.car_x = self.car_y = self.car_z = self.yaw = self.v_x = self.v_y = self.v_z = self.goal_x = self.goal_y = 0
+		self.goal_type = -1
+		self.stop = self.end = False
+
+		# Initialize publishers and class
+		# No remap
+		self.pub_controls = rospy.Publisher('/airsim_node/PhysXCar/car_cmd_body_frame', air.msg.CarCmd, queue_size=1)
+		self.controls = air.msg.CarCmd()
+		# # remap
+		# self.brake_data = Float64()
+		# self.gear_data = String()
+		# self.throttle_data = Float64()
+		# self.steering_data = Float64()
+		# self.pub_brake = rospy.Publisher("/brake_command", Float64, queue_size=1)
+		# self.pub_gear = rospy.Publisher("/gear_command", String, queue_size=1)
+		# self.pub_throttle = rospy.Publisher("/throttle_command", Float64, queue_size=1)
+		# self.pub_steering = rospy.Publisher("/steering_command", Float64, queue_size=1)
+
+	def callback(self, time):
+		steering = 0
+		brake = 0
+		throttle = 0
+		gear = "forward"
+		omega = 0
+		target_speed = 0
+		a = 0
+
+		if self.goal_type == 7 and self.stop and not self.end: # Exit control when reached goal
+			rospy.loginfo("Controller Time: %.2f" %(time.data))
+			self.end = True
+			return
+		elif self.end:
+			return
+
+		car_speed = math.sqrt(math.pow(self.v_x, 2) + math.pow(self.v_y, 2))
+
+		# Calculate distance from car to goal
+		x_diff = self.goal_x - self.car_x
+		y_diff = self.goal_y - self.car_y
+		diff_radius = math.sqrt(math.pow(x_diff,2) + math.pow(y_diff,2))
+
+		### steering control for TEB // Max car steer: 1.0 rad (60 deg) ###
+		if car_speed > 1:
+			# Transform goal coordinates using forward kinematics
+			if abs(self.yaw) > 1.0:
+				self.yaw = 1
+			z = 2 * math.asin(self.yaw) + rad90  # theta
+			g_dx = -(math.cos(z) * x_diff - math.sin(z) * y_diff)
+			g_dy = -(math.sin(z) * x_diff + math.cos(z) * y_diff)
+			a = math.atan(g_dy / g_dx)  # alpha
+			if g_dx < 0 and self.goal_type in [6,8,9,10,11]:
+				a = -a
+			# Steering adjustments
+			if self.goal_type in [3,10]:
+				gain = 0.8 * math.pow(car_speed / 10, 2) + 0.6
+			else:
+				gain = 1
+
+			fct_z = 1.5
+			omega = fct_z * a
+
+			if omega != 0:
+				# Apply Ackermann's steering
+				r = car_speed / -omega
+				adjusted_z = math.atan(b_wheel_base / r)
+				steering = adjusted_z * gain
+
+		if self.goal_type == 7 and diff_radius < 2:
+			self.stop = True
+
+		# throttle and brake control
+		if diff_radius < 96 and self.goal_type in [5,11]:
+			target_speed = diff_radius/3
+			# f_r = mass*g*friction # Road force
+			# f_d = 0.5*rho*drag_coeff*area*math.pow(car_speed,2) # Drag force
+			# a_base = (f_r + f_d) / mass
+			#if (car_speed < target_speed):  # Accelerate
+			#	throttle = a_base * 3 + (target_speed - car_speed) / 30#1 - 1 / math.pow(target_speed - car_speed + 1, 0.7)
+			#else:
+			if car_speed > 8:
+				throttle = 0.015*diff_radius + 0.1
+			else:
+				throttle = 0.0075*diff_radius + 0.2  #1 - 1 / math.pow(- target_speed + car_speed + 1, 0.7)
+			#rospy.loginfo("a_base: %f, target_speed: %f, car_speed: %f, throttle: %f", a_base, target_speed, car_speed, throttle)
+			#if car_speed < 5:
+				#brake = 0.1
+			if self.goal_type == 11:
+				gear = "reverse"
+
+		elif not self.stop:  # Outside of goal radius
+			if self.goal_type in [0,1,4,5,6,7,8,11] or (self.goal_type == 7 and diff_radius > 10):  # Fast straight path
+				if self.goal_type in [0,4,5,6,11]:  # Far from goal/turn
+					#target_speed = self.a_fvmax * math.pow(car_speed, self.power) + self.a_vmin
+					#target_speed = vmax
+					target_speed = 15.3/(1+math.exp(-1*(car_speed-3.7)))+0.8 #max 16
+					#if target_speed > vmax:  # Limit max acceleration
+						#target_speed = vmax
+				else:
+					target_speed = 11.2/(1+math.exp(-1.2*(car_speed-3)))+0.8 #max 12
+					#if target_speed > self.vslow:  # Limit max acceleration
+					#	target_speed = self.vslow
+				diff_speed = target_speed - car_speed
+				# fct = [1.3, 0.5]  # Acceleration gain
+				# f_r = mass*g*friction # Road force
+				# f_d = 0.5*rho*drag_coeff*area*math.pow(car_speed,2) # Drag force
+				# a_base = (f_r + f_d) / mass
+				if (car_speed < 3):
+					throttle = 0.4
+				elif (car_speed < target_speed):  # Accelerate
+					#throttle = a_base * 4 + (target_speed - car_speed) / 30#1 - 1 / math.pow(target_speed - car_speed + 1, 0.7)
+					throttle = diff_speed/target_speed + 0.15
+				else:
+					throttle = 0 #1 - 1 / math.pow(- target_speed + car_speed + 1, 0.7)
+				#rospy.loginfo("a_base: %f, target_speed: %f, car_speed: %f, throttle: %f", a_base, target_speed, car_speed, throttle)
+				#else:
+					#throttle = fct[1] * (car_speed - target_speed) / 10
+				if self.goal_type in [6,8,11]:
+					gear = "reverse"
+
+			elif self.goal_type in [2,3,9,10]:  # Entering or exiting corner
+				if self.goal_type in [2,9]:
+					#target_speed = 0.6 * math.pow(car_speed,2) + 0.9
+					target_speed = 5.3/(1+math.exp(-1.8*(car_speed-1.95)))+0.7 #max6
+					#if target_speed > self.vc_atk:
+					#	target_speed = self.vc_atk
+				else:
+					#target_speed = 0.6 * math.pow(car_speed,2) + 0.9
+					target_speed = 5.3/(1+math.exp(-1.8*(car_speed-1.95)))+0.7 #max6
+					#if target_speed > self.vc_ext1[0]:
+					#	target_speed = self.vc_ext1[0]
+
+				if target_speed >= car_speed:
+					#throttle = 0.02 * (target_speed - car_speed) + 0.6
+					throttle = (target_speed-car_speed)/ target_speed + 0.18
+				if self.goal_type in [9,10]:
+					gear = "reverse"
+
+			elif self.goal_type == 7:  # brake earlier if too fast
+				if diff_radius > 3:
+					target_speed = 4
+					throttle = diff_speed/target_speed + 0.15
+
+			#elif self.goal_type == 5:  # 3-point D
+				#case = 5
+				#target_speed = self.v3pD
+				#throttle = 0.1 * (target_speed - car_speed) + 0.3
+		else: # End condition
+			# brake = 1
+			throttle = 0
+
+		# Ignore negative values and truncate values > 1
+		if throttle < 0:
+			throttle = 0
+
+		if throttle > 1:
+			throttle = 1
+
+		# if brake < 0:
+		# 	brake = 0
+		#
+		# if brake > 1:
+		# 	brake = 1
+
+		if abs(steering) > 1:
+			steering = abs(steering) / steering
+
+		### Publish controls ###
+		# No remap:
+		self.controls.brake = brake
+		if gear == "forward":
+			self.controls.is_manual_gear = False
+			self.controls.gear_immediate = False
+		else:
+			self.controls.is_manual_gear = True
+			self.controls.manual_gear = -1
+			self.controls.gear_immediate = True
+		self.controls.throttle = throttle
+		self.controls.steering = steering
+		self.pub_controls.publish(self.controls)
+
+		# # remap:
+		# self.gear_data.data = gear
+		# self.throttle_data.data = throttle
+		# self.steering_data.data = -steering
+		# self.brake_data.data = brake
+		#
+		# self.pub_gear.publish(self.gear_data)
+		# self.pub_throttle.publish(self.throttle_data)
+		# self.pub_steering.publish(self.steering_data)
+		# self.pub_brake.publish(self.brake_data)
+
+		# rospy.loginfo("Publishing: [D_state: %d, Z_state: %s, Throttle:  %f, Brake: %f, target_speed: %d, Speed_cur: %f, angular_z: %f, a: %f, steer: %f, goal_type: %d, diff_radius: %f]" %(case, z_state, self.throttle, self.brake,target_speed,car_speed,omega,a,self.steering,goal_type,diff_radius))
+
+
+	def position(self, xyz):
+		# Get car position, velocity and orientation
+		self.car_x = xyz.pose.pose.position.x
+		self.car_y = xyz.pose.pose.position.y
+		self.car_z = xyz.pose.pose.position.z
+		self.yaw = xyz.pose.pose.orientation.z
+		self.v_x = xyz.twist.twist.linear.x
+		self.v_y = xyz.twist.twist.linear.y
+		self.v_z = xyz.twist.twist.linear.z
+
+
+	def goalcall(self, dest):
+		self.goal_x = dest.x
+		self.goal_y = dest.y
+		self.goal_type = int(dest.z)
+
+def listener():
+	control = Control()
+	rospy.init_node('cmd_car_control')
+	rospy.Subscriber("/odom", Odometry, control.position) # Get car position
+	rospy.Subscriber("/goals", Vector3, control.goalcall)
+	rospy.Subscriber("/control_timer", Float64, control.callback)
+	rospy.spin()
+
+if __name__ == '__main__':
+	# Constants
+	rad90 = math.radians(90)
+	b_wheel_base = 3 # Wheelbase length [m]
+	mass = 2176.46 # Car mass [kg]
+	g = 9.81 # Gravitational constant [m/s^2]
+	friction = 0.01 # Rolling friction coefficient
+	rho = 1.2 # Air density at NTP [kg/m^3]
+	drag_coeff = 0.357 # Drag coefficient
+	area = 3.389 # Car front chassis area [m^2]
+
+	listener()

@@ -1,0 +1,6 @@
+<launch>
+<!--   <node name="efficiency" pkg="shell_simulation" type="efficiency" output="screen"/> -->
+  <node name="timer" pkg="shell_simulation" type="timer" output="screen"/>
+  <node name="car_control" pkg="shell_simulation" type="car_control" output="screen"/>
+  <node name="goals" pkg="shell_simulation" type="goals" output="screen"/>
+</launch>

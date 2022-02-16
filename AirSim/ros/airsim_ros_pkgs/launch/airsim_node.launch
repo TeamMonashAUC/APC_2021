@@ -1,0 +1,46 @@
+<launch>
+	<arg name="output" default="log"/>
+	<arg name="publish_clock" default="false"/>
+	<arg name="is_vulkan" default="true"/>
+	<arg name="host" default="localhost" />
+	<node name="pointcloud_to_laserscan" pkg="pointcloud_to_laserscan" type="pointcloud_to_laserscan_node">
+		<!-- Min and max height to sample from depth data - these values worked for my drone -->
+    <param name="min_height" value="-5.0"/>
+    <param name="max_height" value="5.0"/>
+
+    <!-- Min and max range range of generated laser scan - set this to match your depth sensor -->
+    <param name="range_min" value="0.2"/>
+    <param name="range_max" value="30.0"/>
+    <!-- Frame of your depth sensor -->
+    <param name="target_frame" value="drone_1/LidarCustom"/>
+		<remap from="cloud_in" to="/airsim_node/drone_1/lidar/LidarCustom" />
+		<remap from="scan" to="/LidarCustom/scan"/>
+	</node>
+	<!-- Nodelet manager for this pipeline -->
+	<node pkg="nodelet" type="nodelet" args="manager" name="depth_transforms_manager" output="screen"/>
+
+	<!-- Convert to point cloud -->
+	<node pkg="nodelet" type="nodelet" name="cloudify"
+	args="load depth_image_proc/point_cloud_xyz depth_transforms_manager --no-bond">
+
+		 <!-- Input: Camera calibration and metadata.  (sensor_msgs/CameraInfo) -->
+		 <remap from="camera_info" to="/airsim_node/drone_1/front_center_custom_sync/camera_info"/>
+		 <!-- Input: Rectified depth image -->
+		 <remap from="image_rect" to="/airsim_node/drone_1/front_center_custom_sync/DepthPlanner"/>
+		 <remap from="points" to="/airsim_node/drone_1/front_center_custom/points"/>
+	</node>
+	<node name="synchronizer" pkg="airsim_ros_pkgs" type="synchronizer" />
+	<node name="airsim_node" pkg="airsim_ros_pkgs" type="airsim_node" output="$(arg output)">
+		<param name="is_vulkan" type="bool" value="false" />
+		<!-- ROS timer rates. Note that timer callback will be processed at maximum possible rate, upperbounded by the following ROS params -->
+		<param name="update_airsim_img_response_every_n_sec" type="double" value="0.05" />
+		<param name="update_airsim_control_every_n_sec" type="double" value="0.01" />
+		<param name="update_lidar_every_n_sec" type="double" value="0.01" />
+		<param name="publish_clock" type="bool" value="$(arg publish_clock)" />
+		<param name="host_ip" type="string" value="$(arg host)" />
+		<remap from="/airsim_node/drone_1/front_center_custom/DepthPlanner/camera_info" to="/airsim_node/drone_1/front_center_custom/camera_info"/>
+	</node>
+
+	<!-- Static transforms -->
+	<include file="$(find airsim_ros_pkgs)/launch/static_transforms.launch"/>
+</launch>
